@@ -11,6 +11,8 @@ tools/vagrant/.vagrant/
 .run/
 # Visual Studio Code
 .vscode/
+# asdf
+.tool-versions
 # Bazel
 /bazel-*
 # vi swap files
