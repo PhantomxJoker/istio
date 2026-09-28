@@ -15,7 +15,6 @@
 package core
 
 import (
-	"strings"
 	"time"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -136,18 +135,32 @@ func (configgen *ConfigGeneratorImpl) buildWaypointInboundClusters(
 	return clusters
 }
 
-// `inbound-vip||hostname|port`. EDS routing to the internal listener for each pod in the VIP.
+// waypointVIPClusterKind distinguishes generated HTTP and TCP clusters,
+// including both variants of a port whose protocol is unknown.
+type waypointVIPClusterKind string
+
+const (
+	waypointVIPTCP  waypointVIPClusterKind = "tcp"
+	waypointVIPHTTP waypointVIPClusterKind = "http"
+)
+
+// `inbound-vip|port|kind[/subset]|hostname`. EDS routing to the internal listener for each pod in the VIP.
 func (cb *ClusterBuilder) buildWaypointInboundVIPCluster(
 	proxy *model.Proxy,
 	svc *model.Service,
 	port model.Port,
-	subset string,
+	kind waypointVIPClusterKind,
+	subsetName string,
 	mesh *meshconfig.MeshConfig,
 	policy *networking.TrafficPolicy,
 	drConfig *config.Config,
 ) *cluster.Cluster {
 	// TODO: is this enough? Probably since we validate no extra listeners are present in the conversion layer
 	terminate := isAmbientEastWestGateway(proxy)
+	subset := string(kind)
+	if subsetName != "" {
+		subset += "/" + subsetName
+	}
 	clusterName := model.BuildSubsetKey(model.TrafficDirectionInboundVIP, subset, svc.Hostname, port.Port)
 
 	var localCluster *clusterWrapper
@@ -225,7 +238,7 @@ func (cb *ClusterBuilder) buildWaypointInboundVIPCluster(
 	// Waypoint admission control is scoped to the generated inbound VIP HTTP
 	// cluster. All callers routed through the same service/port/subset cluster
 	// intentionally share its success-rate history and rejection decisions.
-	if subset == "http" || strings.HasPrefix(subset, "http/") {
+	if kind == waypointVIPHTTP {
 		applyAdmissionControlPolicy(localCluster, admissionControl)
 	}
 	applyOutlierDetection(nil, localCluster.cluster, outlierDetection)
@@ -344,25 +357,25 @@ func (cb *ClusterBuilder) buildWaypointInboundVIP(proxy *model.Proxy, svcs map[h
 			if isAmbientEastWestGateway(proxy) {
 				// East-west gateways don't respect DestinationRule, so don't read it here
 				// TODO: Confirm this decision
-				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, "tcp", mesh, nil, nil))
+				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, waypointVIPTCP, "", mesh, nil, nil))
 				continue
 			}
 			cfg := cb.sidecarScope.DestinationRule(model.TrafficDirectionInbound, proxy, svc.Hostname).GetRule()
 			dr := CastDestinationRule(cfg)
 			policy, _ := util.GetPortLevelTrafficPolicy(dr.GetTrafficPolicy(), port)
 			if port.Protocol.IsUnsupported() || port.Protocol.IsTCP() {
-				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, "tcp", mesh, policy, cfg))
+				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, waypointVIPTCP, "", mesh, policy, cfg))
 			}
 			if port.Protocol.IsUnsupported() || port.Protocol.IsHTTP() {
-				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, "http", mesh, policy, cfg))
+				clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, waypointVIPHTTP, "", mesh, policy, cfg))
 			}
 			for _, ss := range dr.GetSubsets() {
 				policy = util.MergeSubsetTrafficPolicy(dr.GetTrafficPolicy(), ss.GetTrafficPolicy(), port)
 				if port.Protocol.IsUnsupported() || port.Protocol.IsTCP() {
-					clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, "tcp/"+ss.Name, mesh, policy, cfg))
+					clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, waypointVIPTCP, ss.Name, mesh, policy, cfg))
 				}
 				if port.Protocol.IsUnsupported() || port.Protocol.IsHTTP() {
-					clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, "http/"+ss.Name, mesh, policy, cfg))
+					clusters = append(clusters, cb.buildWaypointInboundVIPCluster(proxy, svc, *port, waypointVIPHTTP, ss.Name, mesh, policy, cfg))
 				}
 			}
 		}
