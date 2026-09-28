@@ -214,7 +214,8 @@ func extractAdmissionControl(g *WithT, c *cluster.Cluster) *admissioncontrol.Adm
 
 func buildWaypointAdmissionControlCluster(
 	t testing.TB,
-	subset string,
+	kind waypointVIPClusterKind,
+	subsetName string,
 	portProtocol protocol.Instance,
 	policy *networking.TrafficPolicy,
 ) *cluster.Cluster {
@@ -239,7 +240,8 @@ func buildWaypointAdmissionControlCluster(
 		proxy,
 		service,
 		*port,
-		subset,
+		kind,
+		subsetName,
 		cg.PushContext().Mesh,
 		policy,
 		&config.Config{},
@@ -258,7 +260,7 @@ func TestAdmissionControlPolicyWaypointCluster(t *testing.T) {
 		}),
 	}
 
-	c := buildWaypointAdmissionControlCluster(t, "http", protocol.HTTP, policy)
+	c := buildWaypointAdmissionControlCluster(t, waypointVIPHTTP, "", protocol.HTTP, policy)
 	g.Expect(c.Name).To(Equal("inbound-vip|8080|http|reviews.default.svc.cluster.local"))
 	ac := extractAdmissionControl(g, c)
 	g.Expect(ac.GetSrThreshold().GetDefaultValue().GetValue()).To(Equal(float64(90)))
@@ -266,7 +268,7 @@ func TestAdmissionControlPolicyWaypointCluster(t *testing.T) {
 
 func TestAdmissionControlPolicyWaypointAbsent(t *testing.T) {
 	g := NewWithT(t)
-	c := buildWaypointAdmissionControlCluster(t, "http", protocol.HTTP, &networking.TrafficPolicy{})
+	c := buildWaypointAdmissionControlCluster(t, waypointVIPHTTP, "", protocol.HTTP, &networking.TrafficPolicy{})
 
 	opts := extractHTTPProtocolOptions(g, c)
 	if opts != nil {
@@ -284,11 +286,46 @@ func TestAdmissionControlPolicyWaypointSkipsTCP(t *testing.T) {
 		}),
 	}
 
-	c := buildWaypointAdmissionControlCluster(t, "tcp", protocol.Unsupported, policy)
+	c := buildWaypointAdmissionControlCluster(t, waypointVIPTCP, "", protocol.Unsupported, policy)
 	g.Expect(c.Name).To(Equal("inbound-vip|8080|tcp|reviews.default.svc.cluster.local"))
 	opts := extractHTTPProtocolOptions(g, c)
 	if opts != nil {
 		g.Expect(opts.GetHttpFilters()).To(BeEmpty(), "TCP waypoint cluster must not get upstream HTTP filters")
+	}
+}
+
+func TestAdmissionControlPolicyWaypointUnsupportedProtocol(t *testing.T) {
+	policy := &networking.TrafficPolicy{
+		AdmissionControl: admissionControlWithSuccessRate(&networking.SuccessRate{
+			Threshold: wrapperspb.Double(90),
+		}),
+	}
+
+	tests := []struct {
+		name       string
+		kind       waypointVIPClusterKind
+		subsetName string
+		wantName   string
+		wantAC     bool
+	}{
+		{"HTTP base", waypointVIPHTTP, "", "inbound-vip|8080|http|reviews.default.svc.cluster.local", true},
+		{"TCP base", waypointVIPTCP, "", "inbound-vip|8080|tcp|reviews.default.svc.cluster.local", false},
+		{"HTTP subset", waypointVIPHTTP, "v1", "inbound-vip|8080|http/v1|reviews.default.svc.cluster.local", true},
+		{"TCP subset", waypointVIPTCP, "v1", "inbound-vip|8080|tcp/v1|reviews.default.svc.cluster.local", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			c := buildWaypointAdmissionControlCluster(t, tt.kind, tt.subsetName, protocol.Unsupported, policy)
+			g.Expect(c.Name).To(Equal(tt.wantName))
+			if tt.wantAC {
+				g.Expect(extractAdmissionControl(g, c).GetSrThreshold().GetDefaultValue().GetValue()).To(Equal(float64(90)))
+				return
+			}
+			if opts := extractHTTPProtocolOptions(g, c); opts != nil {
+				g.Expect(opts.GetHttpFilters()).To(BeEmpty(), "TCP waypoint cluster must not get upstream HTTP filters")
+			}
+		})
 	}
 }
 
